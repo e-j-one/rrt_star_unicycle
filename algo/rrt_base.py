@@ -97,8 +97,8 @@ class RRTStarBase:
         if euclid_dist <= self._max_distance:
             return p2, False
 
-        new_x = p1.x + (p2.x - p1.x * self._max_distance / euclid_dist)
-        new_y = p1.y + (p2.y - p1.y * self._max_distance / euclid_dist)
+        new_x = p1.x + ((p2.x - p1.x) * self._max_distance / euclid_dist)
+        new_y = p1.y + ((p2.y - p1.y) * self._max_distance / euclid_dist)
         new_z = p1.z
         p_new = PointHeading((new_x, new_z, new_y))  # MAY RETURN non navigable point
 
