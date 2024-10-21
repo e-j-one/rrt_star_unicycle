@@ -4,10 +4,14 @@ import os
 import random
 from collections import defaultdict
 from os import path as osp
+from datetime import datetime
+from typing import Tuple
 
 import cv2
 import numpy as np
 import tqdm
+import matplotlib.pyplot as plt
+from scipy.ndimage import distance_transform_edt
 
 from .rrt_pointturn import RRTStarPTSelect
 from .rrt_shortest import RRTStarShortestSelect
@@ -56,6 +60,7 @@ class RRTStarBase:
         )
         self._near_threshold = near_threshold
         self._max_distance = max_distance
+        print("max_distance:", max_distance)
         self._max_linear_velocity = max_linear_velocity
         self._max_angular_velocity = max_angular_velocity
         self._directory = directory
@@ -97,8 +102,8 @@ class RRTStarBase:
         if euclid_dist <= self._max_distance:
             return p2, False
 
-        new_x = p1.x + (p2.x - p1.x * self._max_distance / euclid_dist)
-        new_y = p1.y + (p2.y - p1.y * self._max_distance / euclid_dist)
+        new_x = p1.x + ((p2.x - p1.x) * self._max_distance / euclid_dist)
+        new_y = p1.y + ((p2.y - p1.y) * self._max_distance / euclid_dist)
         new_z = p1.z
         p_new = PointHeading((new_x, new_z, new_y))  # MAY RETURN non navigable point
 
@@ -304,6 +309,11 @@ class RRTStarBase:
         """
         np.random.seed(seed)
         random.seed(seed)
+
+        print("Generating tree...")
+        self._visualize_iterations = visualize_iterations
+        generate_tree_start_time = datetime.now()
+
         self._start = PointHeading(start_position, heading=start_heading)
         self._goal = PointHeading(goal_position)
         self.tree[self._start] = None
@@ -316,7 +326,11 @@ class RRTStarBase:
         self.add_to_grid_hash(self._start)
         self._load_tree_from_json(json_path=json_path)
 
+        path_found = False
+        print("\t preperation time:", datetime.now() - generate_tree_start_time)
+
         for iteration in tqdm.trange(int(iterations + 1)):
+            # for iteration in range(int(iterations + 1)):
             if iteration < self._start_iteration:
                 continue
 
@@ -345,6 +359,12 @@ class RRTStarBase:
                         closest_pt = self._closest_tree_pt(rand_pt)
                         rand_pt, has_changed = self._max_point(closest_pt, rand_pt)
                         if not has_changed or self._is_navigable(rand_pt):
+                            # print(
+                            #     "!!! Random point",
+                            #     rand_pt.as_pos(),
+                            #     "cloest:",
+                            #     closest_pt.as_pos(),
+                            # )
                             found_valid_new_node = True
                     else:
                         if self._best_goal_node is None:
@@ -375,6 +395,46 @@ class RRTStarBase:
                         else:
                             found_valid_new_node = True
 
+                use_dbf = True
+
+                # print("closest_pt:", closest_pt.as_pos())
+                if use_dbf and np.random.rand() < 0.5:
+                    local_map_center_pos = (closest_pt.x, closest_pt.y)
+                    goal_pos = (self._goal.x, self._goal.y)
+                    # get the local map around the cloest_pt
+                    local_map = self._get_local_map(local_map_center_pos)
+                    # loc_img = (local_map * 255).astype(np.uint8)
+                    # cv2.imwrite("local_map.png", loc_img)
+                    # print("local_map shape:", local_map.shape)
+                    # with np.printoptions(threshold=np.inf):
+                    #     print(local_map)
+                    # print(
+                    #     "center: ",
+                    #     local_map[local_map.shape[0] // 2, local_map.shape[1] // 2],
+                    # )
+                    self._iteration_count = iteration
+                    rand_pos_adjusted_by_potential = self._sample_point_by_local_map(
+                        local_map, local_map_center_pos, goal_pos
+                    )
+                    rand_pt = PointHeading(
+                        (
+                            rand_pos_adjusted_by_potential[0],
+                            rand_pt.z,
+                            rand_pos_adjusted_by_potential[1],
+                        )
+                    )
+                    # print("=== Using DBF", rand_pt.as_pos())
+                    # print("\tnavigable:", self._is_navigable(rand_pt))
+                    # print(
+                    #     "\tpath_to_center exists:",
+                    #     self._path_exists(closest_pt, rand_pt),
+                    # )
+                    # exit()
+                else:
+                    # print("Not using DBF", rand_pt.x, rand_pt.y)
+                    # print("\tnavigable:", self._is_navigable(rand_pt))
+                    pass
+
                 # Find valid neighbors
                 nearby_nodes = []
                 for pt in self._get_near_pts(rand_pt):
@@ -387,6 +447,7 @@ class RRTStarBase:
                     ):
                         nearby_nodes.append(pt)
                 if not nearby_nodes:
+                    # print("\tNo nearby nodes")
                     continue
 
                 # Find best parent from valid neighbors
@@ -403,6 +464,7 @@ class RRTStarBase:
                         best_cost_from_parent = cost_from_parent
                 # Sometimes there is just one nearby node whose new_cost is NaN. Continue if so.
                 if min_cost == float("inf"):
+                    # print("\tNo valid nearby nodes")
                     continue
 
                 # Add+connect new node to graph
@@ -412,7 +474,10 @@ class RRTStarBase:
                     self._cost_from_parent[rand_pt] = best_cost_from_parent
                     self.add_to_grid_hash(rand_pt)
                 except IndexError:
+                    print("\tIndex error")
                     continue
+
+                self._add_node_in_info_map((rand_pt.x, rand_pt.y))
 
                 # Rewire
                 for pt in nearby_nodes:
@@ -427,6 +492,16 @@ class RRTStarBase:
                     ):
                         self.tree[pt] = rand_pt
                         self._cost_from_parent[pt] = cost_from_new_pt
+
+                if (
+                    not path_found
+                    and self._euclid_2D(rand_pt, self._goal) < self._near_threshold
+                    and self._path_exists(rand_pt, self._goal)
+                ):
+                    print(
+                        f"Path found! Iteration {iteration}, cost: {min_cost}, time: {datetime.now() - generate_tree_start_time}"
+                    )
+                    path_found = True
 
                 # Update best path every so often
                 if iteration % 50 == 0 or iteration % visualize_iterations == 0:
@@ -466,6 +541,8 @@ class RRTStarBase:
                         "Best current cost:",
                         string_tree[self.cost_key],
                         self.cost_units,
+                        " Time:",
+                        datetime.now() - generate_tree_start_time,
                     )
                     with open(json_path, "w") as f:
                         json.dump(string_tree, f)
@@ -720,6 +797,32 @@ class RRTStarPNG(RRTStarBase):
 
         self.pathfinder_type = "png"
 
+        self._info_map = np.zeros_like(self._map, dtype=np.int8)
+        # 1 for obstacle, 0 for navigable
+        # 2 for nodes, 3 for goal
+        self._info_map[self._map != 255] = 1
+
+        print("Map shape:", self._map.shape)
+        print("info map shape:", self._info_map.shape)
+
+        # local_map_meters = 5
+        self._local_map_size = int((self._near_threshold * 1.2) // meters_per_pixel)
+        self._cell_size = meters_per_pixel
+        # print(self._normalized_map)
+        # print(img)
+
+        # for i in range(self._normalized_map.shape[0]):
+        #     print(self._map[i])
+        #     # print(self._normalized_map[i])
+        # for j in range(500):
+        # for j in range(self._normalized_map.shape[1]):
+        # print("j:", j, self._info_map[300][j])
+
+        # save map using cv2
+
+        # cv2.imwrite("_map.png", self._map)
+        cv2.imwrite("_info_map.png", self._info_map * 255.0)
+
     def _is_navigable(self, pt):
         px = self._scale_x(pt.x)
         py = self._scale_x(pt.y)
@@ -745,3 +848,200 @@ class RRTStarPNG(RRTStarBase):
     def _set_offsets(self):
         # Not necessary for PNG
         return
+
+    def _get_local_map(self, local_map_center_pos: Tuple[float, float]) -> np.ndarray:
+        """
+        Get the local map around the node_to_extend_from
+        local_map_size x local_map_size
+        if local map is out of the global map, set out of map area to obstacle
+        """
+        # print("local_map_center_pos:", local_map_center_pos)
+        # local_map_center_idx = (
+        #     self._scale_y(local_map_center_pos[1]),
+        #     self._scale_x(local_map_center_pos[0]),
+        # )
+        # print("local_map_center_idx:", local_map_center_idx)
+        # print("local map size:", self._local_map_size)
+        local_map = np.zeros(
+            (self._local_map_size, self._local_map_size), dtype=np.int8
+        )
+        half_local_map_size = self._local_map_size // 2
+        i_start = int(self._scale_y(local_map_center_pos[1])) - half_local_map_size
+        i_end = int(self._scale_y(local_map_center_pos[1])) + half_local_map_size
+        j_start = int(self._scale_x(local_map_center_pos[0])) - half_local_map_size
+        j_end = int(self._scale_x(local_map_center_pos[0])) + half_local_map_size
+
+        for map_i in range(i_start, i_end):
+            for map_j in range(j_start, j_end):
+                if (
+                    map_i < 0
+                    or map_i >= self._info_map.shape[0]
+                    or map_j < 0
+                    or map_j >= self._info_map.shape[1]
+                ):
+                    local_map[map_i - i_start, map_j - j_start] = (
+                        1  # 1 for obstacle & outboud
+                    )
+                else:
+                    local_map[map_i - i_start, map_j - j_start] = self._info_map[
+                        map_i, map_j
+                    ]
+
+        return local_map
+
+    def _add_node_in_info_map(self, node_pos: Tuple[float, float]):
+        px = self._scale_x(node_pos[0])
+        py = self._scale_y(node_pos[1])
+        self._info_map[py, px] = 2
+
+    def _sample_point_by_local_map(
+        self,
+        local_map: np.ndarray,
+        local_map_center_pos: Tuple[float, float],
+        goal_pos_global: Tuple[float, float],
+        eta: float = 0.5,
+        xi: float = 1.0,
+        rho0: float = 1.0,
+        sigma0: float = 1.0,
+        eta_node: float = 1.0,
+        rho0_node: float = 0.5,
+    ) -> Tuple[float, float]:
+        map_origin = (
+            local_map_center_pos[0] - (self._local_map_size // 2) * self._cell_size,
+            local_map_center_pos[1] - (self._local_map_size // 2) * self._cell_size,
+        )
+        # print("map_origin:", map_origin)
+
+        self._local_field_map = np.zeros_like(local_map, dtype=np.float32)
+
+        # Create obstacle map: obstacles are 1, free space is 0
+        obstacle_map = np.isin(local_map, [1]).astype(int)
+        node_map = np.isin(local_map, [2]).astype(int)
+
+        # print("obstacle_map shape:", obstacle_map.shape)
+        # print("obstacle_map:", obstacle_map)
+
+        # Compute distance transform to obstacles (rho_i)
+        rho_obs = (
+            distance_transform_edt(1 - obstacle_map) * self._cell_size
+        )  # Convert to actual distance units
+        rho_node = (
+            distance_transform_edt(1 - node_map) * self._cell_size
+        )  # Convert to actual distance units
+        # print("rho shape:", rho.shape)
+        # print("rho:", rho)
+
+        # Compute the repulsive potential U_rep(q)
+        U_rep_obs = np.zeros_like(rho_obs)
+        with np.errstate(divide="ignore"):
+            mask_rep = rho_obs <= rho0
+            # print("mask_rep shape:", mask_rep.shape)
+            # print("mask_rep:", mask_rep)
+            U_rep_obs[mask_rep] = (
+                0.5 * eta * (1.0 / rho_obs[mask_rep] - 1.0 / rho0) ** 2
+            )
+
+        U_rep_node = np.zeros_like(rho_node)
+        with np.errstate(divide="ignore"):
+            mask_rep_node = rho_node <= rho0_node
+            U_rep_node[mask_rep_node] = (
+                0.5 * eta_node * (1.0 / rho_node[mask_rep_node] - 1.0 / rho0_node) ** 2
+            )
+
+        # Compute global coordinates of each cell in local_map
+        height, width = local_map.shape
+        x_indices = np.arange(width)
+        y_indices = np.arange(height)
+        x_coords = map_origin[0] + x_indices * self._cell_size
+        y_coords = map_origin[1] + y_indices * self._cell_size
+        x_grid, y_grid = np.meshgrid(x_coords, y_coords)
+
+        # print("local_map_center_pos:", local_map_center_pos)
+        # print("goal_pos_global:", goal_pos_global)
+        # print("x_grid shape:", x_grid.shape)
+        # print("x_grid:", x_grid)
+
+        # print("y_grid shape:", y_grid.shape)
+        # print("y_grid:", y_grid)
+
+        # Compute the distance to the goal (sigma)
+        diff_x = x_grid - goal_pos_global[0]
+        diff_y = y_grid - goal_pos_global[1]
+        sigma = np.sqrt(diff_x**2 + diff_y**2)
+
+        # print("sigma shape:", sigma.shape)
+        # print("sigma:", sigma)
+
+        # Compute the attractive potential U_att(q)
+        U_att = np.zeros_like(sigma)
+        mask_att = sigma <= sigma0
+        U_att[mask_att] = 0.5 * xi * sigma[mask_att] ** 2
+        mask_cone = sigma > sigma0
+        U_att[mask_cone] = xi * sigma0 * (sigma[mask_cone] - 0.5 * sigma0)
+
+        # print("U_att:", U_att)
+        # normalized_U_att = (U_att - np.min(U_att)) / (np.max(U_att) - np.min(U_att))
+        # cv2.imwrite(
+        #     f"att_field_{self._iteration_count}_{local_map_center_pos[0]}_{local_map_center_pos[1]}.png",
+        #     (normalized_U_att * 255).astype(np.uint8),
+        # )
+
+        # Total potential
+        U_total = U_rep_obs + U_rep_node + U_att
+
+        # capped_U_total = np.clip(U_total, 0, np.max(U_total[local_map == 0]))
+        # normalized_capped_U_total = (capped_U_total - np.min(capped_U_total)) / (
+        #     np.max(capped_U_total) - np.min(capped_U_total)
+        # )
+        # cv2.imwrite(
+        #     f"total_field_{self._iteration_count}_{local_map_center_pos[0]}_{local_map_center_pos[1]}.png",
+        #     (normalized_capped_U_total * 255).astype(np.uint8),
+        # )
+
+        # Add np.inf to positions that are further than self._max_distance from the center
+        dist_to_center = np.sqrt(
+            (x_grid - local_map_center_pos[0]) ** 2
+            + (y_grid - local_map_center_pos[1]) ** 2
+        )
+        # print("dist_to_center shape:", dist_to_center.shape)
+        # print("dist_to_center:", dist_to_center)
+
+        U_total[dist_to_center > self._max_distance] = np.inf
+
+        # Get the max value that is not np.inf
+        # If all elements are np.inf, then return the original U_total
+        if np.all(U_total == np.inf):
+            return local_map_center_pos
+
+        if self._iteration_count % self._visualize_iterations == 0:
+            max_U_total = np.max(U_total[U_total != np.inf])
+            capped_U_total = np.clip(U_total, 0, max_U_total)
+            normalized_capped_U_total = (capped_U_total - np.min(capped_U_total)) / (
+                np.max(capped_U_total) - np.min(capped_U_total)
+            )
+            field_dir = osp.join(self._directory, "fields")
+            field_img_path = osp.join(
+                field_dir,
+                f"total_field_{self._iteration_count}_{local_map_center_pos[0]}_{local_map_center_pos[0]}.png",
+            )
+            if not osp.exists(field_dir):
+                os.makedirs(field_dir)
+            cv2.imwrite(
+                field_img_path,
+                (normalized_capped_U_total * 255).astype(np.uint8),
+            )
+
+        # Get the point with the minimum potential
+        min_U_total = np.min(U_total)
+        min_U_total_idx = np.where(U_total == min_U_total)
+        # print("min_U_total:", min_U_total)
+
+        # Get the position of minimum potential
+        min_U_total_pos = (
+            x_coords[min_U_total_idx[1][0]],
+            y_coords[min_U_total_idx[0][0]],
+        )
+        # print("min_U_total_idx:", min_U_total_idx)
+        # print("min_U_total_pos:", min_U_total_pos)
+
+        return min_U_total_pos

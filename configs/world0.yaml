@@ -3,14 +3,15 @@ RRT_TYPE: 'unicycle'
 
 # Path to png file representing 2D map. White pixels are navigable, gray/black are not.
 # A path of '' indicates that habitat_sim will be used instead.
-PNG_FILE: 'maps/example_map.png'
-METERS_PER_PIXEL: 0.008333333333
+PNG_FILE: 'maps/world0.png'
+METERS_PER_PIXEL: 0.1
 START_POSITION: [100, 150] # in pixels (x, y), where (0, 0) is the top left corner
 START_HEADING: 0.0 # in degrees, where 0 is north and 90 is east
-GOAL_POSITION: [100, 590] # in pixels (x, y), where (0, 0) is the top left corner
+GOAL_POSITION: [650, 350] # in pixels (x, y), where (0, 0) is the top left corner
 
 # Where visualizations and json files (where trees are stored) are saved
-OUT_DIR: 'example_map_241022_0316_e05en1xi1'
+OUT_DIR: 'world0_241022_0340_e05en1xi1'
+# OUT_DIR: 'world0_241022_0340_vanilla'
 
 # Radius of the agent, which will shrink the navigable space
 # Note: Agent is assumed to be cylindrical
@@ -29,4 +30,4 @@ VISUALIZE_ON_SCREEN: False
 ITERATIONS: 5e3
 
 # How often jsons/visualizations should be saved
-VISUALIZE_ITERATIONS: 20
+VISUALIZE_ITERATIONS: 40
